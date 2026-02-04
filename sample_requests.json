@@ -1,0 +1,44 @@
+{
+  "sample_requests": [
+    {
+      "description": "UPI Fraud Scam",
+      "method": "POST",
+      "endpoint": "/api/process",
+      "request": {
+        "message_text": "Congratulations! You won ₹25,00,000 lottery. Send ₹500 processing fee to winner789@ybl",
+        "conversation_id": "lottery_scam_001"
+      }
+    },
+    {
+      "description": "Phishing Scam",
+      "method": "POST",
+      "endpoint": "/api/process",
+      "request": {
+        "message_text": "URGENT: Your bank account will be suspended. Click http://verify-bank-account.xyz/login to secure",
+        "conversation_id": "phishing_001"
+      }
+    },
+    {
+      "description": "Bank Transfer Scam",
+      "method": "POST",
+      "endpoint": "/api/process",
+      "request": {
+        "message_text": "Dear customer, transfer ₹15,000 to account 987654321012 to reactivate your SIM card",
+        "conversation_id": "bank_scam_001"
+      }
+    },
+    {
+      "description": "Normal Message (Negative Test)",
+      "method": "POST",
+      "endpoint": "/api/process",
+      "request": {
+        "message_text": "Hello, how are you doing today?",
+        "conversation_id": "normal_001"
+      }
+    }
+  ],
+  "test_commands": {
+    "curl_example": "curl -X POST http://localhost:8000/api/process -H \"Content-Type: application/json\" -d '{\"message_text\": \"Test scam message\", \"conversation_id\": \"test1\"}'",
+    "python_example": "import requests\nresponse = requests.post('http://localhost:8000/api/process', json={'message_text': 'Test', 'conversation_id': 'test1'})\nprint(response.json())"
+  }
+}
