@@ -1,6 +1,6 @@
 import httpx
 import asyncio
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from pydantic import BaseModel
 from datetime import datetime
 import re
@@ -16,27 +16,16 @@ load_dotenv()
 app = FastAPI(
     title="Agentic Honey-Pot API",
     description="AI-powered scam detection and intelligence extraction system",
-    version="2.1",
+    version="2.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
 
 # ========== CONFIGURATION ==========
 API_KEYS = {
-    os.getenv("API_KEY", "hackathon-submission-2026"): ["admin"]
-}
-
-TEAM_KEYS = {
-    "hackathon-submission-2026": ["admin"],
+    os.getenv("API_KEY", "hackathon-submission-2026"): ["admin"],
     "hackathon-judge-key": ["judge"],
 }
-
-API_KEYS.update(TEAM_KEYS)
-
-CALLBACK_URL = os.getenv(
-    "CALLBACK_URL",
-    "https://mock-scammer-api.example.com/callback"
-)
 
 # ========== API KEY AUTH ==========
 async def verify_api_key(api_key: str = Header(..., alias="X-API-Key")):
@@ -45,10 +34,6 @@ async def verify_api_key(api_key: str = Header(..., alias="X-API-Key")):
     return api_key
 
 # ========== MODELS ==========
-class MessageRequest(BaseModel):
-    message_text: str
-    conversation_id: str = "default"
-
 class ResponseData(BaseModel):
     response_text: str
     scam_detected: bool
@@ -70,7 +55,7 @@ def check_rate_limit(api_key: str):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
 # ========== SCAM DETECTOR ==========
-def detect_scam(text):
+def detect_scam(text: str):
     patterns = [
         (r"urgent|verify|account blocked", 0.4),
         (r"http[s]?://|www\.", 0.5),
@@ -85,16 +70,24 @@ def detect_scam(text):
     return score >= 0.7, min(score, 1.0), triggers
 
 # ========== INTELLIGENCE EXTRACTOR ==========
-def extract_intelligence(text):
+def extract_intelligence(text: str):
     raw_upi = re.findall(r'([\w\.-]+@(ybl|axl|okaxis|oksbi|paytm))', text, re.I)
     upi_ids = [u[0] for u in raw_upi]
 
+    bank_accounts = re.findall(r'\b\d{9,18}\b', text)
+    phone_numbers = re.findall(r'\b[6-9]\d{9}\b', text)
+    urls = re.findall(r'https?://[^\s]+', text)
+
+    keywords = ["urgent", "verify", "account", "payment", "click"]
+    found_keywords = [k for k in keywords if k in text.lower()]
+
     return {
         "upi_ids": list(set(upi_ids)),
-        "bank_accounts": list(set(re.findall(r'\b\d{9,18}\b', text))),
-        "phone_numbers": list(set(re.findall(r'\b[6-9]\d{9}\b', text))),
-        "urls": [{"url": u, "is_suspicious": True} for u in re.findall(r'https?://[^\s]+', text)],
-        "keywords": [k for k in ["urgent", "verify", "account", "payment", "click"] if k in text.lower()]
+        "bank_accounts": list(set(bank_accounts)),
+        "phone_numbers": list(set(phone_numbers)),
+        "urls": [{"url": u, "is_suspicious": True} for u in urls],
+        "keywords": found_keywords,
+        "techniques": ["urgency"] if "urgent" in text.lower() else []
     }
 
 # ========== AGENT ==========
@@ -108,15 +101,10 @@ def get_agent_response(is_scam, extracted, turn):
         "Please confirm the payment method."
     ]
 
-    should_end = (
-        turn >= 4
-        and extracted["upi_ids"]
-        and extracted["bank_accounts"]
-    )
-
+    should_end = turn >= 4 and extracted["upi_ids"] and extracted["bank_accounts"]
     return random.choice(responses), True, "end" if should_end else "continue"
 
-# ========== CONVERSATION STATE ==========
+# ========== CONVERSATIONS ==========
 conversations = {}
 
 def manage_conversation(cid, user_msg, agent_msg, is_scam, extracted):
@@ -138,8 +126,9 @@ def manage_conversation(cid, user_msg, agent_msg, is_scam, extracted):
         conv["agent_engaged"] = True
 
     for k, v in extracted.items():
-        if isinstance(v, list):
-            conv["extracted_intelligence"].setdefault(k, [])
+        if k not in conv["extracted_intelligence"]:
+            conv["extracted_intelligence"][k] = v
+        elif isinstance(v, list):
             conv["extracted_intelligence"][k] = list(
                 set(conv["extracted_intelligence"][k] + v)
             )
@@ -150,61 +139,71 @@ def manage_conversation(cid, user_msg, agent_msg, is_scam, extracted):
     }
 
 # ========== CALLBACK ==========
-async def send_callback(conversation_id, extracted, total_messages):
+async def send_callback_endpoint(conversation_id, extracted_intelligence, total_messages):
+    callback_url = "https://mock-scammer-api.example.com/callback"
+
     payload = {
         "sessionId": conversation_id,
         "scamDetected": True,
         "totalMessagesExchanged": total_messages,
         "extractedIntelligence": {
-            "bankAccounts": extracted.get("bank_accounts", []),
-            "upiIds": extracted.get("upi_ids", []),
-            "phishingLinks": [u["url"] for u in extracted.get("urls", [])],
-            "phoneNumbers": extracted.get("phone_numbers", []),
-            "suspiciousKeywords": extracted.get("keywords", [])
+            "bankAccounts": extracted_intelligence.get("bank_accounts", []),
+            "upiIds": extracted_intelligence.get("upi_ids", []),
+            "phishingLinks": [u["url"] for u in extracted_intelligence.get("urls", [])],
+            "phoneNumbers": extracted_intelligence.get("phone_numbers", []),
+            "suspiciousKeywords": extracted_intelligence.get("keywords", [])
         },
         "agentNotes": "Scammer used urgency and payment redirection tactics"
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.post(CALLBACK_URL, json=payload)
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            res = await client.post(callback_url, json=payload)
             return res.status_code in (200, 201)
-    except Exception as e:
-        print(f"[CALLBACK ERROR] {e}")
-        return False
+        except Exception:
+            return False
 
 # ========== MAIN ENDPOINT ==========
 @app.post("/api/v1/process", response_model=ResponseData)
-async def process_message(req: MessageRequest, api_key: str = Depends(verify_api_key)):
+async def process_message(request: Request, api_key: str = Depends(verify_api_key)):
     check_rate_limit(api_key)
 
-    is_scam, confidence, _ = detect_scam(req.message_text)
-    extracted = extract_intelligence(req.message_text)
+    body = await request.json()
 
-    turn = len(conversations.get(req.conversation_id, {}).get("messages", [])) + 1
+    # 🔥 Hackathon tester + normal payload support
+    if "message" in body:
+        message_text = body["message"]
+        conversation_id = body.get("sessionId", "auto-session")
+    else:
+        message_text = body.get("message_text")
+        conversation_id = body.get("conversation_id", "default")
+
+    if not message_text:
+        raise HTTPException(status_code=400, detail="Invalid request body")
+
+    is_scam, confidence, triggers = detect_scam(message_text)
+    extracted = extract_intelligence(message_text)
+
+    turn = len(conversations.get(conversation_id, {}).get("messages", [])) + 1
     response_text, agent_engaged, next_action = get_agent_response(is_scam, extracted, turn)
 
     metrics = manage_conversation(
-        req.conversation_id,
-        req.message_text,
+        conversation_id,
+        message_text,
         response_text,
         is_scam,
         extracted
     )
 
-    conv = conversations[req.conversation_id]
+    conv = conversations[conversation_id]
 
-    # ✅ FINAL CALLBACK TRIGGER (ONCE)
-    if (
-        conv["scam_detected"]
-        and next_action == "end"
-        and not conv["callback_sent"]
-    ):
-        if await send_callback(
-            req.conversation_id,
+    if conv["scam_detected"] and next_action == "end" and not conv["callback_sent"]:
+        success = await send_callback_endpoint(
+            conversation_id,
             conv["extracted_intelligence"],
             len(conv["messages"])
-        ):
+        )
+        if success:
             conv["callback_sent"] = True
 
     return ResponseData(
@@ -214,14 +213,245 @@ async def process_message(req: MessageRequest, api_key: str = Depends(verify_api
         confidence=confidence,
         extracted_data=extracted,
         timestamp=datetime.now().isoformat(),
-        conversation_id=req.conversation_id,
+        conversation_id=conversation_id,
         next_action=next_action,
         metrics=metrics
     )
 
+# ========== HEALTH CHECK (OPTIONAL BUT RECOMMENDED) ==========
+@app.get("/")
+def health():
+    return {"status": "Agentic Honeypot running"}
+
 # ========== RUN ==========
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
+
+# import httpx
+# import asyncio
+# from fastapi import FastAPI, HTTPException, Depends, Header
+# from pydantic import BaseModel
+# from datetime import datetime
+# import re
+# import random
+# import uvicorn
+# from typing import Dict, List, Optional
+# import os
+# from dotenv import load_dotenv
+
+# # Load environment variables
+# load_dotenv()
+
+# # app = FastAPI(
+#     title="Agentic Honey-Pot API",
+#     description="AI-powered scam detection and intelligence extraction system",
+#     version="2.1",
+#     docs_url="/docs",
+#     redoc_url="/redoc"
+# )
+
+# # ========== CONFIGURATION ==========
+# API_KEYS = {
+#     os.getenv("API_KEY", "hackathon-submission-2026"): ["admin"]
+# }
+
+# TEAM_KEYS = {
+#     "hackathon-submission-2026": ["admin"],
+#     "hackathon-judge-key": ["judge"],
+# }
+
+# API_KEYS.update(TEAM_KEYS)
+
+# CALLBACK_URL = os.getenv(
+#     "CALLBACK_URL",
+#     "https://mock-scammer-api.example.com/callback"
+# )
+
+# # ========== API KEY AUTH ==========
+# async def verify_api_key(api_key: str = Header(..., alias="X-API-Key")):
+#     if api_key not in API_KEYS:
+#         raise HTTPException(status_code=403, detail="Invalid API key")
+#     return api_key
+
+# # ========== MODELS ==========
+# class MessageRequest(BaseModel):
+#     message_text: str
+#     conversation_id: str = "default"
+
+# class ResponseData(BaseModel):
+#     response_text: str
+#     scam_detected: bool
+#     agent_engaged: bool
+#     confidence: float
+#     extracted_data: dict
+#     timestamp: str
+#     conversation_id: str
+#     next_action: str
+#     metrics: Optional[dict] = None
+
+# # ========== RATE LIMIT ==========
+# rate_limits = {}
+
+# def check_rate_limit(api_key: str):
+#     key = f"{api_key}_{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+#     rate_limits[key] = rate_limits.get(key, 0) + 1
+#     if rate_limits[key] > 100:
+#         raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+# # ========== SCAM DETECTOR ==========
+# def detect_scam(text):
+#     patterns = [
+#         (r"urgent|verify|account blocked", 0.4),
+#         (r"http[s]?://|www\.", 0.5),
+#         (r"upi|bank|transfer|payment", 0.4),
+#     ]
+#     score = 0
+#     triggers = []
+#     for p, w in patterns:
+#         if re.search(p, text, re.I):
+#             score += w
+#             triggers.append(p)
+#     return score >= 0.7, min(score, 1.0), triggers
+
+# # ========== INTELLIGENCE EXTRACTOR ==========
+# def extract_intelligence(text):
+#     raw_upi = re.findall(r'([\w\.-]+@(ybl|axl|okaxis|oksbi|paytm))', text, re.I)
+#     upi_ids = [u[0] for u in raw_upi]
+
+#     return {
+#         "upi_ids": list(set(upi_ids)),
+#         "bank_accounts": list(set(re.findall(r'\b\d{9,18}\b', text))),
+#         "phone_numbers": list(set(re.findall(r'\b[6-9]\d{9}\b', text))),
+#         "urls": [{"url": u, "is_suspicious": True} for u in re.findall(r'https?://[^\s]+', text)],
+#         "keywords": [k for k in ["urgent", "verify", "account", "payment", "click"] if k in text.lower()]
+#     }
+
+# # ========== AGENT ==========
+# def get_agent_response(is_scam, extracted, turn):
+#     if not is_scam:
+#         return "Thanks for the message.", False, "end"
+
+#     responses = [
+#         "Can you send the details again?",
+#         "That didn’t work. Do you have another account?",
+#         "Please confirm the payment method."
+#     ]
+
+#     should_end = (
+#         turn >= 4
+#         and extracted["upi_ids"]
+#         and extracted["bank_accounts"]
+#     )
+
+#     return random.choice(responses), True, "end" if should_end else "continue"
+
+# # ========== CONVERSATION STATE ==========
+# conversations = {}
+
+# def manage_conversation(cid, user_msg, agent_msg, is_scam, extracted):
+#     if cid not in conversations:
+#         conversations[cid] = {
+#             "start_time": datetime.now().isoformat(),
+#             "messages": [],
+#             "scam_detected": False,
+#             "agent_engaged": False,
+#             "extracted_intelligence": {},
+#             "callback_sent": False
+#         }
+
+#     conv = conversations[cid]
+#     conv["messages"].append({"user": user_msg, "agent": agent_msg})
+
+#     if is_scam:
+#         conv["scam_detected"] = True
+#         conv["agent_engaged"] = True
+
+#     for k, v in extracted.items():
+#         if isinstance(v, list):
+#             conv["extracted_intelligence"].setdefault(k, [])
+#             conv["extracted_intelligence"][k] = list(
+#                 set(conv["extracted_intelligence"][k] + v)
+#             )
+
+#     return {
+#         "turn_count": len(conv["messages"]),
+#         "scam_detected": conv["scam_detected"]
+#     }
+
+# # ========== CALLBACK ==========
+# async def send_callback(conversation_id, extracted, total_messages):
+#     payload = {
+#         "sessionId": conversation_id,
+#         "scamDetected": True,
+#         "totalMessagesExchanged": total_messages,
+#         "extractedIntelligence": {
+#             "bankAccounts": extracted.get("bank_accounts", []),
+#             "upiIds": extracted.get("upi_ids", []),
+#             "phishingLinks": [u["url"] for u in extracted.get("urls", [])],
+#             "phoneNumbers": extracted.get("phone_numbers", []),
+#             "suspiciousKeywords": extracted.get("keywords", [])
+#         },
+#         "agentNotes": "Scammer used urgency and payment redirection tactics"
+#     }
+
+#     try:
+#         async with httpx.AsyncClient(timeout=10) as client:
+#             res = await client.post(CALLBACK_URL, json=payload)
+#             return res.status_code in (200, 201)
+#     except Exception as e:
+#         print(f"[CALLBACK ERROR] {e}")
+#         return False
+
+# # ========== MAIN ENDPOINT ==========
+# @app.post("/api/v1/process", response_model=ResponseData)
+# async def process_message(req: MessageRequest, api_key: str = Depends(verify_api_key)):
+#     check_rate_limit(api_key)
+
+#     is_scam, confidence, _ = detect_scam(req.message_text)
+#     extracted = extract_intelligence(req.message_text)
+
+#     turn = len(conversations.get(req.conversation_id, {}).get("messages", [])) + 1
+#     response_text, agent_engaged, next_action = get_agent_response(is_scam, extracted, turn)
+
+#     metrics = manage_conversation(
+#         req.conversation_id,
+#         req.message_text,
+#         response_text,
+#         is_scam,
+#         extracted
+#     )
+
+#     conv = conversations[req.conversation_id]
+
+#     # ✅ FINAL CALLBACK TRIGGER (ONCE)
+#     if (
+#         conv["scam_detected"]
+#         and next_action == "end"
+#         and not conv["callback_sent"]
+#     ):
+#         if await send_callback(
+#             req.conversation_id,
+#             conv["extracted_intelligence"],
+#             len(conv["messages"])
+#         ):
+#             conv["callback_sent"] = True
+
+#     return ResponseData(
+#         response_text=response_text,
+#         scam_detected=is_scam,
+#         agent_engaged=agent_engaged,
+#         confidence=confidence,
+#         extracted_data=extracted,
+#         timestamp=datetime.now().isoformat(),
+#         conversation_id=req.conversation_id,
+#         next_action=next_action,
+#         metrics=metrics
+#     )
+
+# # ========== RUN ==========
+# if __name__ == "__main__":
+#     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
 
 
@@ -810,4 +1040,5 @@ if __name__ == "__main__":
     
 
 #     uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
+
 
