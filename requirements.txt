@@ -1,4 +1,6 @@
 fastapi
 uvicorn
 pydantic
+python-dotenv
 httpx==0.25.2
+
